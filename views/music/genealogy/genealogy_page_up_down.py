@@ -1,4 +1,6 @@
-﻿from services.common.paths import MUSIC_DATA
+﻿
+from __future__ import annotations
+from services.common.paths import MUSIC_DATA
 
 # views/genealogy_page.py
 # -----------------------------------------------------------------------------
@@ -8,7 +10,7 @@
 # - Sankey: 10% de folga lateral; linhas não-destacadas mais claras;
 #           "Show only the selected branch" mantém o layout e esconde só as linhas.
 # -----------------------------------------------------------------------------
-from __future__ import annotations
+
 
 import os
 import re

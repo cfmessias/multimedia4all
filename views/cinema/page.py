@@ -5,11 +5,12 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from .data import load_genres, load_table
-from .ui.helpers import key_for, author_label_and_key
-from .ui.search import run_search
-from .ui.cards import render_remote_results
-from .ui.local_csv import render_local_results
+from cinema.data import load_genres, load_table
+
+from views.cinema.ui.helpers import key_for, author_label_and_key
+from views.cinema.ui.search import run_search
+from views.cinema.ui.cards import render_remote_results
+from views.cinema.ui.local_csv import render_local_results
 
 # ===== Região por defeito para providers (pode vir de env/secrets) =====
 TMDB_REGION_DEFAULT = (

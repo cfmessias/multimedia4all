@@ -6,6 +6,7 @@ import requests
 import streamlit as st
 from services.music.spotify.auth import get_auth_header
 from services.genres_bridge import resolve_genre_canon_and_aliases, norm_label
+from .core import get_spotify_token
 
 SEARCH_URL = "https://api.spotify.com/v1/search"
 
@@ -30,6 +31,17 @@ FADO_TOKENS_WHITELIST = {
 FADO_CONFLICTS = {"morna", "coladeira", "funana", "kizomba", "mpb", "bossa"}
 
 # ---------------- Utilitários ----------------
+# formatter simples usado no UI / logs
+def fmt(value, decimals: int = 2, none: str = "—"):
+    if value is None:
+        return none
+    if isinstance(value, bool):
+        return "✓" if value else "✗"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        return f"{value:.{decimals}f}"
+    return str(value)
 
 def _tokenize_label(s: str) -> Set[str]:
     """Normaliza e tokeniza um rótulo: sem acentos, lower, separa por não-alfa-numérico."""

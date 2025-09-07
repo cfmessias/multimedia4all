@@ -1,11 +1,15 @@
-﻿from views.music.genres.page import render_genres_page
+﻿from __future__ import annotations
+from services.music.spotify.core import get_spotify_token
+import importlib
+import os
+import streamlit as st
+from views.music.genres.page import render_genres_page_roots as render_genres_page
+
 from views.music.influence_map.influence_map import render_influence_map_page
 from views.music.genealogy.genealogy_page_up_down import render_genealogy_page
 
 # app.py — Music & Cinema with Tabs + Typography normalization
-from __future__ import annotations
-import os
-import streamlit as st
+
 
 # ------------------------------------------------------------
 # Page config (tem de ser o primeiro comando Streamlit)
@@ -110,7 +114,7 @@ st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 # ------------------------------------------------------------
 # Spotify token (usado nas páginas de música)
 # ------------------------------------------------------------
-services.music.spotify import get_spotify_token
+#
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 TOKEN = get_spotify_token(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
@@ -122,29 +126,37 @@ TOKEN = get_spotify_token(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
 from views.music.spotify.page import render_spotify_page
 from views.music.playlists.playlists_page import render_playlists_page
 from views.radio.radio import render_radio_page
-from views.genres_roots_page import render_genres_page_roots as render_genres_page
+
 from views.music.wiki.wiki_page import render_wikipedia_page
 from views.podcasts.podcasts import render_podcasts_page
 
 # Cinema — resolve diferença de nomes/assinaturas
 def _resolve_cinema_runner():
     try:
-        try:
-            # novo nome
-            from views.cinema.page import render_cinema_page as _cin
-        except ImportError:
-            # fallback antigo
-            from views.cinema.page import render_page as _cin
+        # módulo certo da UI
+        mod = importlib.import_module("views.cinema.page")
 
-        def run(section="Movies"):
+        # tenta primeiro o nome novo; senão, o legacy
+        _cin = getattr(mod, "render_cinema_page", None) or getattr(mod, "render_page", None)
+        if _cin is None:
+            raise AttributeError("Nem 'render_cinema_page' nem 'render_page' existem em views.cinema.page")
+
+        def run(section: str = "Movies"):
             try:
-                return _cin(section=section)  # se aceitar argumento
+                # preferimos com argumento nomeado
+                return _cin(section=section)
             except TypeError:
-                return _cin()                  # fallback sem argumento
+                # se a assinatura não aceitar 'section', chama sem args
+                return _cin()
+
         return run
+
     except Exception as e:
-        def run(section="Movies", _e=e):
-            st.error(f"Cinema page not available: {_e}")
+        # MOSTRA o erro real — muito mais útil para debugging
+        def run(section: str = "Movies", _e=e):
+            st.error(f"Cinema page not available: {_e.__class__.__name__}: {_e}")
+            # se quiseres o traceback completo:
+            # st.exception(_e)
         return run
 
 render_cinema = _resolve_cinema_runner()
@@ -233,6 +245,8 @@ with tab_cinema:
         render_artists_page()
     else:
         render_cinema(section=section)
+
+
 
 
 

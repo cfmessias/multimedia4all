@@ -2,7 +2,11 @@
 import requests
 import streamlit as st
 from streamlit import components
-services.music.spotify import get_spotify_token, fmt
+
+# NÃO FAZER: from services.music.spotify import get_spotify_token, fmt
+# Em vez disso, importa dos módulos concretos (sem tocar no __init__):
+from services.music.spotify.core import get_spotify_token
+from services.music.spotify.search_service import fmt, get_auth_header
 
 # ---------------------------
 # Utils
@@ -265,9 +269,38 @@ def spotify_genre_playlists(token: str, leaf: str, path_ctx: list[str], limit: i
 # ---------------------------
 # Embed
 # ---------------------------
-def embed_spotify(kind: str, _id: str, height: int = 80):
-    if not kind or not _id:
-        return
-    src = f"https://open.spotify.com/embed/{kind}/{_id}"
-    components.v1.iframe(src, height=height, width=380)
+# def embed_spotify(kind: str, _id: str, height: int = 80):
+#     if not kind or not _id:
+#         return
+#     src = f"https://open.spotify.com/embed/{kind}/{_id}"
+#     components.v1.iframe(src, height=height, width=380)
 
+# --- Spotify embed unificado (compacto por omissão) ---
+from streamlit import components
+
+def embed_spotify(kind: str, sid: str, *, size: str = "compact",
+                  height: int | None = None, width: int | None = None):
+    """
+    kind: 'track' | 'episode' | 'show' | 'album' | 'playlist'
+    size: 'compact' (default) | 'medium' | 'full'
+    height/width: se passados, sobrepõem o preset (backwards-compatible).
+    """
+    if not kind or not sid:
+        return
+
+    # presets de altura/largura (valores mínimos aceitáveis pelo Spotify)
+    WIDTH = {"compact": 380, "medium": 520, "full": 640}
+    HEIGHT = {
+        "track":   {"compact": 80,  "medium": 152, "full": 152},
+        "episode": {"compact": 152, "medium": 232, "full": 352},
+        "show":    {"compact": 232, "medium": 352, "full": 352},
+        "album":   {"compact": 232, "medium": 352, "full": 352},
+        "playlist":{"compact": 232, "medium": 352, "full": 352},
+    }
+
+    # aplica presets só quando não vier altura/largura explícita
+    h = height if height is not None else HEIGHT.get(kind, {}).get(size, 232)
+    w = width  if width  is not None else WIDTH.get(size, 380)
+
+    src = f"https://open.spotify.com/embed/{kind}/{sid}"
+    components.v1.iframe(src, height=h, width=w)
