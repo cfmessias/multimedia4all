@@ -25,6 +25,7 @@ from services.music.spotify.lookup import (
 from .spotify_widgets import render_artist_list, render_playlist_list
 
 
+
 def _genre_blurb_and_source(name: str):
     """
     Mostra SEMPRE o resumo da Wikipédia (EN→PT) quando existir.
@@ -322,6 +323,7 @@ def render_genres_page_roots():
         ctrlL, ctrlR = st.columns([3, 2])
         with ctrlL:
             depth = st.slider("Map depth (levels down)", 1, 4, 2, key="gen_depth")
+
         with ctrlR:
             preset = st.selectbox(
                 "Chart options",
@@ -340,19 +342,46 @@ def render_genres_page_roots():
                 gh = st.slider("Height (px)", 300, 900, 520, 20, key="g_height")
                 fs = st.slider("Label size", 10, 22, 15, 1, key="g_font")
 
+        min_depth = max(1, len(path) - 1)
+        depth = max(depth, min_depth)
         # Dados do gráfico
         adj = build_label_adjacency(children_idx)
 
-        MAX_FIRST_LEVEL = 30
-        first_children = sorted(adj.get(root_genre, set()), key=str.lower)
-        too_many = len(first_children) > MAX_FIRST_LEVEL
+        # --- helpers para normalizar rótulos e obter filhos diretos de forma robusta ---
+        def _norm_label(s: str) -> str:
+            if s is None:
+                return ""
+            return (str(s)
+                    .replace("\u2011", "-").replace("\u2013", "-").replace("\u2014", "-")
+                    .replace("–", "-").replace("—", "-").replace("\xa0", " ")
+                    .strip().casefold())
+
+        def get_direct_children_adj(adj_map: dict, label: str):
+            # tenta chave exata
+            kids = adj_map.get(label, set())
+            if not kids:
+                # fallback: procura chave equivalente (case/hífen/nbsp)
+                norm = _norm_label(label)
+                for k in adj_map.keys():
+                    if _norm_label(k) == norm:
+                        kids = adj_map.get(k, set())
+                        break
+            # garante lista e dedup por normalização
+            kids_list = sorted(list(kids), key=str.lower)
+            uniq_norm = { _norm_label(k) for k in kids_list }
+            return kids_list, len(uniq_norm)
+
+        MAX_FIRST_LEVEL = 20
+        direct_children, direct_count = get_direct_children_adj(adj, root_genre)
+        too_many = direct_count > MAX_FIRST_LEVEL
 
         if too_many and len(path) <= 1:
             st.info(
-                f"“{root_genre}” has {len(first_children)} direct subgenres. "
+                f"“{root_genre}” has {direct_count} direct subgenres. "
                 "Pick a subgenre on the left to display just that branch."
             )
         else:
+            # --- exatamente como já tinhas ---
             nodes_ds, edges_ds, level_ds = bfs_down_labels(adj, root_genre, depth)
             adj_up = build_reverse_adjacency(adj)
             nodes_up, edges_up, level_up = bfs_up_labels(adj_up, root_genre, depth)
@@ -367,8 +396,12 @@ def render_genres_page_roots():
                 selected_first = path[1]
                 right_nodes, right_edges, right_level = bfs_down_labels(adj, selected_first, max(0, depth - 1))
                 edges = edges_up + [(root_genre, selected_first)] + right_edges
-                level = {**level_up, root_genre: 0, selected_first: 1,
-                         **{n: l + 1 for n, l in right_level.items()}}
+                level = {
+                    **level_up,
+                    root_genre: 0,
+                    selected_first: 1,
+                    **{n: l + 1 for n, l in right_level.items()}
+                }
                 nodes = sorted(set([*nodes_up, root_genre, selected_first, *right_nodes]), key=str.lower)
 
             if not nodes or not edges:
@@ -382,6 +415,7 @@ def render_genres_page_roots():
                 )
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
                 st.caption("Blue = highlighted path from root to the selected branch.")
+
 
 # alias de compatibilidade
 render_genres_page = render_genres_page_roots
