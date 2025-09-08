@@ -4,13 +4,14 @@ from __future__ import annotations
 import requests
 import streamlit as st
 from services.music.spotify.search_service import get_auth_header
-
+from services.music.spotify.lookup import get_spotify_token_cached
 # Normalização de market (import + fallback)
 try:
     from services.common.locale import norm_market  # type: ignore
 except Exception:
     import re
-    def norm_market(m: str | None, default: str | None = "PT") -> str | None:
+
+def norm_market(m: str | None, default: str | None = "PT") -> str | None:
         if not m:
             return default
         s = str(m).strip()
@@ -19,6 +20,20 @@ except Exception:
         if s == "UK":
             s = "GB"
         return s if (len(s) == 2 and s.isalpha()) else default
+    
+def _episode_date_key(ep: dict) -> str:
+    """
+    Cria uma chave YYYYMMDD mesmo quando release_date vem como 'YYYY' ou 'YYYY-MM'.
+    Episódios sem data vão para o fim.
+    """
+    s = (ep.get("release_date") or "").strip()
+    if not s:
+        return "00000000"
+    parts = s.split("-")  # "YYYY" | "YYYY-MM" | "YYYY-MM-DD"
+    y = parts[0] if len(parts) > 0 else "0000"
+    m = parts[1] if len(parts) > 1 else "00"
+    d = parts[2] if len(parts) > 2 else "00"
+    return f"{y}{m}{d}"
 
 @st.cache_data(ttl=900, show_spinner=False)
 def list_episodes(show_id: str, market: str, *, limit: int = 10, offset: int = 0):
@@ -29,9 +44,10 @@ def list_episodes(show_id: str, market: str, *, limit: int = 10, offset: int = 0
     if not show_id:
         return {"items": []}
 
-    headers = get_auth_header() or {}
-    if "Authorization" not in headers:
+    tok = get_spotify_token_cached()
+    if not tok:
         return {"items": []}
+    headers = {"Authorization": f"Bearer {tok}"}
 
     params = {
         "limit": max(1, min(int(limit or 10), 50)),
@@ -69,4 +85,5 @@ def list_episodes(show_id: str, market: str, *, limit: int = 10, offset: int = 0
             "explicit": bool(it.get("explicit")),
             "url": (it.get("external_urls") or {}).get("spotify") or "",
         })
-    return {"items": items}
+    items_sorted = sorted(items, key=_episode_date_key, reverse=True)
+    return {"items": items_sorted}

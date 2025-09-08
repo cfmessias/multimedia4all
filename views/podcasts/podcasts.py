@@ -51,6 +51,8 @@ def _default_country() -> str:
 DEFAULTS: Dict[str, object] = {"term": "", "country": _default_country(), "limit": 30}
 WKEY = {"term": "pod_term", "country": "pod_country", "limit": "pod_limit"}
 
+TOGGLE_KEY = "podcasts_show_favs_v2"
+
 _ls = LocalStorage()
 
 def _ls_set(key: str, value: str) -> None:
@@ -141,30 +143,82 @@ def _sp_get(path: str, params: Dict | None = None) -> Dict:
 
 @st.cache_data(ttl=900, show_spinner=True)
 def search_shows(term: str, country: str, limit: int) -> List[Dict]:
-    term = (term or "").strip()
-    if not term:
+    """
+    Pesquisa robusta por shows:
+      P1) frase exata em shows
+      P2) todas as palavras em shows
+      P3) frase exata em episodes (promove show pai)
+      P4) fallback simples
+    Filtra resultados para garantir que todas as palavras surgem em name|publisher (sem acentos).
+    """
+    import unicodedata, re
+
+    def _norm(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "")
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        s = re.sub(r"\s+", " ", s).strip().lower()
+        return s
+
+    def _has_all_words(hay: str, words: list[str]) -> bool:
+        h = _norm(hay)
+        return all(w in h for w in words)
+
+    q_raw = (term or "").strip()
+    if not q_raw:
         return []
-    try:
-        data = _sp_get(
-            "/search",
-            {
-                "q": term,
-                "type": "show",
-                "market": norm_market(country, default="PT"),
-                "limit": max(1, min(int(limit or 30), 50)),
-            },
-        )
-        items = ((data.get("shows") or {}).get("items") or [])
-        seen, out = set(), []
-        for it in items:
-            sid = it.get("id")
-            if sid in seen:
-                continue
+
+    mk  = norm_market(country, default="PT")
+    lim = max(1, min(int(limit or 30), 50))
+    words = [w for w in _norm(q_raw).split(" ") if w]
+
+    def _fetch(q: str, type_: str):
+        try:
+            return _sp_get(
+                "/search",
+                {"q": q, "type": type_, "market": mk, "limit": lim},
+            )
+        except Exception:
+            return {}
+
+    results: List[Dict] = []
+
+    # P1: frase exata em shows
+    data = _fetch(f'"{q_raw}"', "show")
+    items = ((data.get("shows") or {}).get("items")) or []
+    results += [it for it in items
+                if _has_all_words(f"{it.get('name','')} {it.get('publisher','')}", words)]
+
+    # P2: todas as palavras em shows (broad)
+    if len(results) < 5 and len(words) > 1:
+        data = _fetch(" ".join(words), "show")
+        items = ((data.get("shows") or {}).get("items")) or []
+        results += [it for it in items
+                    if _has_all_words(f"{it.get('name','')} {it.get('publisher','')}", words)]
+
+    # P3: frase exata em episodes → sobe show pai
+    if len(results) < 5:
+        data = _fetch(f'"{q_raw}"', "episode")
+        eps = ((data.get("episodes") or {}).get("items")) or []
+        for ep in eps:
+            sh = (ep.get("show") or {})
+            if sh and _has_all_words(f"{sh.get('name','')} {sh.get('publisher','')}", words):
+                results.append(sh)
+
+    # P4: fallback simples
+    if not results:
+        data = _fetch(q_raw, "show")
+        results += ((data.get("shows") or {}).get("items")) or []
+
+    # dedupe preservando ordem
+    seen: set[str] = set()
+    out: List[Dict] = []
+    for it in results:
+        sid = it.get("id")
+        if sid and sid not in seen:
             seen.add(sid)
             out.append(it)
-        return out
-    except Exception:
-        return []
+
+    return out[:lim]
 
 @st.cache_data(ttl=900, show_spinner=False)
 def latest_episode_id(show_id: str, country: str) -> Optional[str]:
@@ -209,7 +263,7 @@ def _toggle_embed(kind: str, sid: str, idx, src: str):
 # ===================== Página =====================
 
 def render_podcasts_page():
-    # Compactar inputs/botões
+    # === CSS compacto ===
     st.markdown("""
     <style>
     .stTextInput input, .stNumberInput input, .stButton > button, .stLinkButton > a {
@@ -222,12 +276,28 @@ def render_podcasts_page():
     </style>
     """, unsafe_allow_html=True)
 
-    # === aplicar pedidos pendentes (antes de criar widgets) ===
-    pending = st.session_state.pop("_pod_next_values", None)
-    if isinstance(pending, dict):
+    # === aplicar pedidos PENDENTES de valores (antes de criar widgets) ===
+    pending_vals = st.session_state.pop("_pod_next_values", None)
+    if isinstance(pending_vals, dict):
         for k in DEFAULTS:
-            st.session_state[WKEY[k]] = pending.get(k, DEFAULTS[k])
+            st.session_state[WKEY[k]] = pending_vals.get(k, DEFAULTS[k])
 
+    # controla quais favoritos estão com a lista de episódios aberta
+    if "pod_fav_eps_open" not in st.session_state:
+        st.session_state["pod_fav_eps_open"] = {}  # dict[str,bool]
+
+    # === aplicar AÇÕES agendadas (search) ANTES dos widgets ===
+    pending_act = st.session_state.pop("_pod_action", None)
+    if isinstance(pending_act, dict) and pending_act.get("name") == "search":
+        p = pending_act.get("params") or {}
+        term    = p.get("term", "")
+        country = p.get("country", str(DEFAULTS["country"]))
+        limit   = p.get("limit", DEFAULTS["limit"])
+        results = search_shows(term, norm_market(country, default="PT") or "PT", limit)
+        st.session_state["pod_results"] = results
+        _set_embed(None, None, None, None)
+
+    # === cabeçalho ===
     st.subheader("Podcasts")
     st.caption("Source: Spotify")
 
@@ -235,7 +305,7 @@ def render_podcasts_page():
         st.warning("Spotify credentials missing (SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET). "
                    "Search and episodes may be empty until configured.")
 
-    # ---- Search form (DUAS LINHAS) ----
+    # === SEARCH form (duas linhas) ===
     with st.container(border=True):
         st.markdown("#### 🔎 Search")
 
@@ -260,140 +330,103 @@ def render_podcasts_page():
                 st.session_state["_pod_next_values"] = {k: prefs[k] for k in DEFAULTS}
                 st.rerun()
         with r2c3:
-            do_search = st.button("🔎 Search", type="primary", use_container_width=True)
+            if st.button("🔎 Search", type="primary", use_container_width=True):
+                st.session_state["_pod_action"] = {
+                    "name": "search",
+                    "params": {
+                        "term":    st.session_state.get(WKEY["term"], ""),
+                        "country": st.session_state.get(WKEY["country"], str(DEFAULTS["country"])),
+                        "limit":   st.session_state.get(WKEY["limit"], DEFAULTS["limit"]),
+                    },
+                }
+                st.rerun()
         with r2c4:
-            if st.button("⟳ Reset", use_container_width=True):
+            # Reset filters: limpa filtros, resultados e player, limpa cache e refresca
+            if st.button("⟳ Reset filters", use_container_width=True):
                 st.session_state["_pod_next_values"] = {k: DEFAULTS[k] for k in DEFAULTS}
+                st.session_state.pop("pod_results", None)
+                _set_embed(None, None, None, None)
+                st.cache_data.clear()
                 st.rerun()
 
     st.markdown("---")
 
-    if do_search:
-        results = search_shows(
-            st.session_state.get(WKEY["term"], ""),
-            norm_market(st.session_state.get(WKEY["country"], str(DEFAULTS["country"])), default="PT") or "PT",
-            st.session_state.get(WKEY["limit"], DEFAULTS["limit"]),
-        )
-        st.session_state["pod_results"] = results
-        _set_embed(None, None, None, None)
-
-    # ---- Results (depois da pesquisa) ----
+    # === resultados ===
     results = st.session_state.get("pod_results", [])
     st.markdown("### Results")
     if not results:
         st.info("Enter a search term and press **Search**.")
-    else:
-        st.write(f"Found **{len(results)}** podcast(s).")
-        fav_ids = {r.get("id") for r in load_device_favorites()}
+        
 
-        for i, show in enumerate(results, start=1):
-            with st.container(border=True):
-                c1, c2, c3 = st.columns([0.14, 0.56, 0.30])
+    st.write(f"Found **{len(results)}** podcast(s).")
+    fav_ids = {r.get("id") for r in load_device_favorites()}
 
-                with c1:
-                    imgs = (show.get("images") or [])
-                    url = imgs[0]["url"] if imgs else ""
-                    st.image(url, width=56) if url else st.write("—")
+    for i, show in enumerate(results, start=1):
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([0.14, 0.56, 0.30])
 
-                with c2:
-                    name = show.get("name") or "—"
-                    pub  = show.get("publisher") or "—"
-                    langs = ", ".join(show.get("languages") or [])
-                    st.markdown(f"**{name}**  \n{pub}" + (f" • {langs}" if langs else ""))
+            with c1:
+                imgs = (show.get("images") or [])
+                url = imgs[0]["url"] if imgs else ""
+                st.image(url, width=56) if url else st.write("—")
 
-                with c3:
-                    sid = show.get("id") or ""
-                    is_fav = sid in fav_ids
-                    a1, a2, a3 = st.columns([0.28, 0.44, 0.28])
+            with c2:
+                name  = show.get("name") or "—"
+                pub   = show.get("publisher") or "—"
+                langs = ", ".join(show.get("languages") or [])
+                st.markdown(f"**{name}**  \n{pub}" + (f" • {langs}" if langs else ""))
 
-                    with a1:
-                        face = "🙂" if is_fav else "🤔"
-                        tip  = "Remove from favorites" if is_fav else "Add to favorites"
-                        if st.button(face, key=f"pod_face_{i}", help=tip, use_container_width=True):
-                            if is_fav:
-                                remove_favorite_local(sid)
-                            else:
-                                add_favorite_local(show)
-                            st.rerun()
-
-                    with a2:
-                        if st.button("Play latest", key=f"pod_play_{i}", use_container_width=True):
-                            ep = latest_episode_id(sid, st.session_state.get(WKEY["country"], DEFAULTS["country"]))
-                            if ep:
-                                _toggle_embed("episode", ep, f"res_{i}", "res")
-                            else:
-                                _toggle_embed("show", sid, f"res_{i}", "res")
-                        emb = st.session_state.get("pod_embed")
-                        if emb and emb[2] == f"res_{i}" and emb[3] == "res":
-                            st.markdown('<span class="pod-badge">Playing</span>', unsafe_allow_html=True)
-
-                    with a3:
-                        sp = (show.get("external_urls") or {}).get("spotify", "")
-                        if sp:
-                            st.link_button("Open", sp, use_container_width=True)
-
-            # Player (result card)
-            emb = st.session_state.get("pod_embed")
-            if emb and emb[2] == f"res_{i}" and emb[3] == "res":
-                kind, sid, *_ = emb
-                _embed(kind, sid)
-                if st.button("✖ Close player", key=f"close_res_{i}", help="Hide player"):
-                    _set_embed(None, None, None, None)
-                    st.rerun()
-
-            # Episodes (expandable, com Refresh sem cache)
-            with st.expander("Episodes", expanded=False):
+            with c3:
                 sid = show.get("id") or ""
-                mk = norm_market(st.session_state.get(WKEY["country"], str(DEFAULTS["country"])), default="PT") or "PT"
+                is_fav = sid in fav_ids
+                a1, a2, a3 = st.columns([0.28, 0.44, 0.28])
 
-                cE1, cE2 = st.columns([0.22, 0.78])
-                with cE1:
-                    refresh = st.button("⟳ Refresh", key=f"ep_refresh_{i}", use_container_width=True)
-                with cE2:
-                    if not get_spotify_token_cached():
-                        st.warning("Spotify token missing — episodes may be empty.")
+                with a1:
+                    face = "🙂" if is_fav else "🤔"
+                    tip  = "Remove from favorites" if is_fav else "Add to favorites"
+                    # usa o id como parte da key para evitar colisões entre runs/cartas
+                    if st.button(face, key=f"pod_face_{sid}", help=tip, use_container_width=True):
+                        if is_fav:
+                            remove_favorite_local(sid)
+                        else:
+                            add_favorite_local(show)
+                        st.rerun()
+                with a2:
+                    if st.button("Play latest", key=f"pod_play_{i}", use_container_width=True):
+                        ep = latest_episode_id(sid, st.session_state.get(WKEY["country"], DEFAULTS["country"]))
+                        if ep:
+                            _toggle_embed("episode", ep, f"res_{i}", "res")
+                        else:
+                            _toggle_embed("show", sid, f"res_{i}", "res")
+                    emb = st.session_state.get("pod_embed")
+                    if emb and emb[2] == f"res_{i}" and emb[3] == "res":
+                        st.markdown('<span class="pod-badge">Playing</span>', unsafe_allow_html=True)
 
-                eps_pack = (list_episodes.__wrapped__(sid, mk, limit=10, offset=0) if refresh
-                            else list_episodes(sid, mk, limit=10, offset=0))
-                eps = (eps_pack or {}).get("items") or []
+                with a3:
+                    sp = (show.get("external_urls") or {}).get("spotify", "")
+                    if sp:
+                        st.link_button("Open", sp, use_container_width=True)
 
-                if not eps:
-                    st.caption("No episodes found.")
-                else:
-                    for k, ep in enumerate(eps, start=1):
-                        ec1, ec2, ec3 = st.columns([0.68, 0.18, 0.14])
-                        with ec1:
-                            line = f"**{ep['name']}**  \n{ep['release_date']} • {ep['duration']}"
-                            if ep.get("explicit"):
-                                line += " • 🔞 explicit"
-                            st.markdown(line)
-                        with ec2:
-                            if st.button("▶ Play", key=f"ep_play_{i}_{k}", use_container_width=True):
-                                _toggle_embed("episode", ep["id"], f"ep_{i}_{k}", "res_ep")
-                            emb = st.session_state.get("pod_embed")
-                            if emb and emb[2] == f"ep_{i}_{k}" and emb[3] == "res_ep":
-                                st.markdown('<span class="pod-badge">Playing</span>', unsafe_allow_html=True)
-                        with ec3:
-                            if ep.get("url"):
-                                st.link_button("Open", ep["url"], use_container_width=True)
+        # Player (result card)
+        emb = st.session_state.get("pod_embed")
+        if emb and emb[2] == f"res_{i}" and emb[3] == "res":
+            kind, sid, *_ = emb
+            _embed(kind, sid)
+            if st.button("✖ Close player", key=f"close_res_{i}", help="Hide player"):
+                _set_embed(None, None, None, None)
+                st.rerun()
 
-                        # Inline episode player
-                        emb = st.session_state.get("pod_embed")
-                        if emb and emb[2] == f"ep_{i}_{k}" and emb[3] == "res_ep":
-                            _embed("episode", ep["id"])
-                            if st.button("✖ Close player", key=f"close_ep_{i}_{k}", help="Hide player"):
-                                _set_embed(None, None, None, None)
-                                st.rerun()
+        # Episodes (expandable, com Refresh sem cache)
+        pass
 
     st.markdown("---")
 
-    # ---- Favorites (DEPOIS dos resultados) ----
+    # === Favoritos (toggle e lista) ===
     st.markdown("### ⭐ My favorites (on this device)")
 
     _raw = (_ls_get("podcasts.showFavs") or "true").strip().lower()
     _show_default = _raw in ("true", "1", "yes", "on")
-    show_favs = st.toggle("Show favorites", value=_show_default, key="pod_show_favs")
-
+    show_favs = st.toggle("Show favorites", value=_show_default, key=TOGGLE_KEY)
     if show_favs != _show_default:
         _ls_set("podcasts.showFavs", "true" if show_favs else "false")
 
@@ -404,6 +437,7 @@ def render_podcasts_page():
         else:
             st.caption(f"{len(favs)} favorite(s)")
             for j, row in enumerate(favs, start=1):
+                row_key = (row.get("key") or row.get("id") or str(j)).replace(" ", "_")
                 with st.container(border=True):
                     c1, c2, c3 = st.columns([0.14, 0.56, 0.30])
 
@@ -415,39 +449,84 @@ def render_podcasts_page():
 
                     with c2:
                         name = row.get("name") or "—"
-                        pub = row.get("publisher") or "—"
+                        pub  = row.get("publisher") or "—"
                         langs = ", ".join(row.get("languages") or [])
                         meta = pub + (f" • {langs}" if langs else "")
                         st.markdown(f"**{name}**  \n{meta}")
 
                     with c3:
                         a1, a2, a3 = st.columns([0.28, 0.44, 0.28])
+
+                        # 🗑 remover dos favoritos
                         with a1:
-                            st.button("🙂", key=f"fav_ok_{j}", help="In favorites",
-                                      use_container_width=True, disabled=True)
+                            if st.button("🗑 Remove", key=f"fav_del_{row_key}",
+                                         help="Remove from favorites", use_container_width=True):
+                                remove_favorite_local(row_key)
+                                # fecha lista de episódios se estiver aberta
+                                st.session_state["pod_fav_eps_open"].pop(row_key, None)
+                                st.rerun()
+
+                        # 📻 abrir/fechar lista de episódios deste favorito
                         with a2:
-                            if st.button("Play latest", key=f"fav_play_{j}", use_container_width=True):
-                                mk = norm_market(st.session_state.get(WKEY["country"], str(DEFAULTS["country"])), default="PT") or "PT"
-                                ep = latest_episode_id(row.get("id") or "", mk)
-                                if ep:
-                                    _toggle_embed("episode", ep, f"fav_{j}", "fav")
-                                else:
-                                    _toggle_embed("show", row.get("id") or "", f"fav_{j}", "fav")
-                            emb = st.session_state.get("pod_embed")
-                            if emb and emb[2] == f"fav_{j}" and emb[3] == "fav":
-                                st.markdown('<span class="pod-badge">Playing</span>', unsafe_allow_html=True)
+                            opened = bool(st.session_state["pod_fav_eps_open"].get(row_key))
+                            label  = "📻 Episodes (hide)" if opened else "📻 Episodes"
+                            if st.button(label, key=f"fav_eps_btn_{row_key}", use_container_width=True):
+                                st.session_state["pod_fav_eps_open"][row_key] = not opened
+                                st.rerun()
+
                         with a3:
                             if row.get("url"):
                                 st.link_button("Open", row["url"], use_container_width=True)
 
-                emb = st.session_state.get("pod_embed")
-                if emb and emb[2] == f"fav_{j}" and emb[3] == "fav":
-                    kind, sid, *_ = emb
-                    _embed(kind, sid)
-                    if st.button("✖ Close player", key=f"close_fav_{j}", help="Hide player"):
-                        _set_embed(None, None, None, None)
-                        st.rerun()
+                # === lista de episódios do favorito (se aberta) ===
+                if st.session_state["pod_fav_eps_open"].get(row_key):
+                    with st.container(border=True):
+                        sid = row.get("id") or ""
+                        mk  = norm_market(st.session_state.get(WKEY["country"], str(DEFAULTS["country"])), default="PT") or "PT"
 
+                        b1, b2 = st.columns([0.22, 0.78])
+                        with b1:
+                            refresh = st.button("⟳ Refresh", key=f"fav_eps_refresh_{row_key}", use_container_width=True)
+                        with b2:
+                            if not get_spotify_token_cached():
+                                st.warning("Spotify token missing — episodes may be empty.")
+
+                        eps_pack = (list_episodes.__wrapped__(sid, mk, limit=50, offset=0) if refresh
+                                    else list_episodes(sid, mk, limit=50, offset=0))
+                        eps = (eps_pack or {}).get("items") or []
+
+                        if not eps:
+                            st.caption("No episodes found.")
+                        else:
+                            for k, ep in enumerate(eps, start=1):
+                                ec1, ec2, ec3 = st.columns([0.68, 0.18, 0.14])
+                                with ec1:
+                                    line = f"**{ep['name']}**  \n{ep['release_date']} • {ep['duration']}"
+                                    if ep.get("explicit"):
+                                        line += " • 🔞 explicit"
+                                    st.markdown(line)
+                                with ec2:
+                                    if st.button("▶ Play", key=f"fav_ep_play_{row_key}_{k}", use_container_width=True):
+                                        _toggle_embed("episode", ep["id"], f"fav_ep_{row_key}_{k}", "fav_eps")
+                                    emb = st.session_state.get("pod_embed")
+                                    if emb and emb[2] == f"fav_ep_{row_key}_{k}" and emb[3] == "fav_eps":
+                                        st.markdown('<span class="pod-badge">Playing</span>', unsafe_allow_html=True)
+                                with ec3:
+                                    if ep.get("url"):
+                                        st.link_button("Open", ep["url"], use_container_width=True)
+
+                                # player inline por episódio (favoritos)
+                                emb = st.session_state.get("pod_embed")
+                                if emb and emb[2] == f"fav_ep_{row_key}_{k}" and emb[3] == "fav_eps":
+                                    _embed("episode", ep["id"])
+                                    if st.button("✖ Close player", key=f"close_fav_ep_{row_key}_{k}", help="Hide player"):
+                                        _set_embed(None, None, None, None)
+                                        st.rerun()
+
+
+    st.markdown("---")
+
+  
 
 if __name__ == "__main__":
     st.set_page_config(page_title="Podcasts", page_icon="🎙️", layout="centered")
