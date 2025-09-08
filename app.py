@@ -200,9 +200,7 @@ with tab_music:
     if selected == "Spotify":
         render_spotify_page(TOKEN, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
     elif selected == "Playlists":
-        render_playlists_page()
-    #elif selected == "Radio":
-    #    render_radio_page()
+        render_playlists_page()    
     elif selected == "Genres":
         render_genres_page()
     elif selected == "Wikipedia":
