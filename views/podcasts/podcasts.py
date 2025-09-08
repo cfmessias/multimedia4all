@@ -6,52 +6,39 @@ from typing import Dict, List, Optional
 
 import requests
 import streamlit as st
-from streamlit_local_storage import LocalStorage
+from streamlit import components
 
-# Usa helpers do teu stack Spotify
+# LocalStorage (com fallback caso a lib não exista na cloud)
+try:
+    from streamlit_local_storage import LocalStorage  # type: ignore
+except Exception:
+    class LocalStorage:  # type: ignore
+        def getItem(self, k: str):
+            v = st.session_state.get(f"_ls:{k}")
+            return v if isinstance(v, str) else None
+        def setItem(self, k: str, v: str):
+            st.session_state[f"_ls:{k}"] = v
+
+# Spotify helpers
 from services.music.spotify.lookup import get_spotify_token_cached, embed_spotify
 
-# ------------------------------------------------------------
-#  Fallback: list_episodes (se o serviço não existir no projeto)
-# ------------------------------------------------------------
+# Normalização de país/market (import + fallback local)
 try:
-    from services.music.spotify.episodes import list_episodes  # type: ignore
+    from services.common.locale import norm_market  # type: ignore
 except Exception:
-    def list_episodes(show_id: str, market: str, *, limit: int = 10, offset: int = 0):
-        """Fallback direto à API Spotify em caso de ausência do serviço."""
-        if not show_id:
-            return {"items": []}
-        tok = get_spotify_token_cached()
-        if not tok:
-            return {"items": []}
-        headers = {"Authorization": f"Bearer {tok}"}
-        r = requests.get(
-            f"https://api.spotify.com/v1/shows/{show_id}/episodes",
-            headers=headers,
-            params={
-                "market": (market or "PT").upper(),
-                "limit": max(1, min(int(limit or 10), 50)),
-                "offset": max(0, int(offset or 0)),
-            },
-            timeout=15,
-        )
-        if r.status_code != 200:
-            return {"items": []}
-        data = r.json() or {}
-        out = []
-        for e in data.get("items") or []:
-            dur_ms = int(e.get("duration_ms") or 0)
-            mm = dur_ms // 60000
-            ss = (dur_ms // 1000) % 60
-            out.append({
-                "id": e.get("id"),
-                "name": e.get("name") or "",
-                "release_date": e.get("release_date") or "",
-                "duration": f"{mm:d}:{ss:02d}",
-                "explicit": bool(e.get("explicit")),
-                "url": (e.get("external_urls") or {}).get("spotify", ""),
-            })
-        return {"items": out}
+    import re
+    def norm_market(m: Optional[str], default: Optional[str] = "PT") -> Optional[str]:
+        if not m:
+            return default
+        s = str(m).strip()
+        s = re.split(r"[-_]", s, maxsplit=1)[0] if s else s
+        s = s.upper()
+        if s == "UK":
+            s = "GB"
+        return s if (len(s) == 2 and s.isalpha()) else default
+
+# Serviço de episódios (usa o teu módulo)
+from services.music.spotify.episodes import list_episodes
 
 # ===================== Defaults & LocalStorage =====================
 
@@ -64,7 +51,6 @@ def _default_country() -> str:
 DEFAULTS: Dict[str, object] = {"term": "", "country": _default_country(), "limit": 30}
 WKEY = {"term": "pod_term", "country": "pod_country", "limit": "pod_limit"}
 
-# instancia localStorage (browser)
 _ls = LocalStorage()
 
 def _ls_set(key: str, value: str) -> None:
@@ -164,7 +150,7 @@ def search_shows(term: str, country: str, limit: int) -> List[Dict]:
             {
                 "q": term,
                 "type": "show",
-                "market": (country or "PT").upper(),
+                "market": norm_market(country, default="PT"),
                 "limit": max(1, min(int(limit or 30), 50)),
             },
         )
@@ -186,7 +172,7 @@ def latest_episode_id(show_id: str, country: str) -> Optional[str]:
         return None
     try:
         data = _sp_get(f"/shows/{show_id}/episodes",
-                       {"market": (country or "PT").upper(), "limit": 1})
+                       {"market": norm_market(country, default="PT"), "limit": 1})
         items = data.get("items") or []
         return items[0]["id"] if items else None
     except Exception:
@@ -194,29 +180,21 @@ def latest_episode_id(show_id: str, country: str) -> Optional[str]:
 
 # ===================== Embed helpers =====================
 
-# def _embed(kind: str, sid: str, *, compact: bool = True):
-#     if not sid:
-#         st.info("Nothing to play.")
-#         return
-#     # alturas compactas
-#     height = 152 if (compact and kind == "episode") else (232 if compact else 352)
-#     try:
-#         return embed_spotify(kind, sid, height=height)
-#     except TypeError:
-#         return embed_spotify(kind, sid)
 def _embed(kind: str, sid: str, *, compact: bool = True):
     if not sid:
         st.info("Nothing to play.")
         return
-    # passa sempre por embed_spotify unificado
     try:
-        from services.music.spotify.lookup import embed_spotify
+        # versão unificada (preferida)
         embed_spotify(kind, sid, size="compact" if compact else "medium")
+    except TypeError:
+        # retro-compat: algumas versões aceitam height/width
+        h = 152 if kind == "episode" else 232
+        embed_spotify(kind, sid, height=h, width=380)
     except Exception:
-        # fallback minimal, se necessário
-        from streamlit import components
-        components.v1.iframe(f"https://open.spotify.com/embed/{kind}/{sid}",
-                             height=152 if kind=="episode" else 232, width=380)
+        # fallback bruto
+        h = 152 if kind == "episode" else 232
+        components.v1.iframe(f"https://open.spotify.com/embed/{kind}/{sid}", height=h, width=380)
 
 def _set_embed(kind: str | None, sid: str | None, idx, src: str | None):
     st.session_state["pod_embed"] = None if not kind else (kind, sid, idx, src)
@@ -231,13 +209,12 @@ def _toggle_embed(kind: str, sid: str, idx, src: str):
 # ===================== Página =====================
 
 def render_podcasts_page():
-    # Compacta inputs/botões
+    # Compactar inputs/botões
     st.markdown("""
     <style>
     .stTextInput input, .stNumberInput input, .stButton > button, .stLinkButton > a {
       padding: .40rem .55rem; font-size: .92rem;
     }
-    /* badge 'Playing' */
     .pod-badge {
       background: #22d3ee; color: #05151b; padding: 2px 8px; border-radius: 999px;
       font-weight: 700; font-size: 0.82rem; display: inline-block; margin-top: 6px;
@@ -245,12 +222,18 @@ def render_podcasts_page():
     </style>
     """, unsafe_allow_html=True)
 
+    # === aplicar pedidos pendentes (antes de criar widgets) ===
+    pending = st.session_state.pop("_pod_next_values", None)
+    if isinstance(pending, dict):
+        for k in DEFAULTS:
+            st.session_state[WKEY[k]] = pending.get(k, DEFAULTS[k])
+
     st.subheader("Podcasts")
     st.caption("Source: Spotify")
 
     if not get_spotify_token_cached():
         st.warning("Spotify credentials missing (SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET). "
-                   "Search may fail until configured.")
+                   "Search and episodes may be empty until configured.")
 
     # ---- Search form (DUAS LINHAS) ----
     with st.container(border=True):
@@ -261,7 +244,7 @@ def render_podcasts_page():
         with r1c1:
             st.text_input("Search", key=WKEY["term"], placeholder="e.g., science, cinema, news")
         with r1c2:
-            st.text_input("Country", key=WKEY["country"], placeholder="PT", max_chars=2)
+            st.text_input("Country", key=WKEY["country"], placeholder="PT", max_chars=5)
         with r1c3:
             st.slider("Results limit", 10, 50, value=int(DEFAULTS["limit"]),
                       key=WKEY["limit"], step=10)
@@ -274,15 +257,13 @@ def render_podcasts_page():
         with r2c2:
             if st.button("Load defaults", use_container_width=True):
                 prefs = load_device_defaults()
-                for k in DEFAULTS:
-                    st.session_state[WKEY[k]] = prefs[k]
+                st.session_state["_pod_next_values"] = {k: prefs[k] for k in DEFAULTS}
                 st.rerun()
         with r2c3:
             do_search = st.button("🔎 Search", type="primary", use_container_width=True)
         with r2c4:
             if st.button("⟳ Reset", use_container_width=True):
-                for k, v in DEFAULTS.items():
-                    st.session_state[WKEY[k]] = v
+                st.session_state["_pod_next_values"] = {k: DEFAULTS[k] for k in DEFAULTS}
                 st.rerun()
 
     st.markdown("---")
@@ -290,7 +271,7 @@ def render_podcasts_page():
     if do_search:
         results = search_shows(
             st.session_state.get(WKEY["term"], ""),
-            st.session_state.get(WKEY["country"], DEFAULTS["country"]) or DEFAULTS["country"],
+            norm_market(st.session_state.get(WKEY["country"], str(DEFAULTS["country"])), default="PT") or "PT",
             st.session_state.get(WKEY["limit"], DEFAULTS["limit"]),
         )
         st.session_state["pod_results"] = results
@@ -360,12 +341,22 @@ def render_podcasts_page():
                     _set_embed(None, None, None, None)
                     st.rerun()
 
-            # Episodes (expandable)
+            # Episodes (expandable, com Refresh sem cache)
             with st.expander("Episodes", expanded=False):
                 sid = show.get("id") or ""
-                eps_pack = list_episodes(sid, st.session_state.get(WKEY["country"], DEFAULTS["country"]),
-                                         limit=10, offset=0)
-                eps = eps_pack.get("items") or []
+                mk = norm_market(st.session_state.get(WKEY["country"], str(DEFAULTS["country"])), default="PT") or "PT"
+
+                cE1, cE2 = st.columns([0.22, 0.78])
+                with cE1:
+                    refresh = st.button("⟳ Refresh", key=f"ep_refresh_{i}", use_container_width=True)
+                with cE2:
+                    if not get_spotify_token_cached():
+                        st.warning("Spotify token missing — episodes may be empty.")
+
+                eps_pack = (list_episodes.__wrapped__(sid, mk, limit=10, offset=0) if refresh
+                            else list_episodes(sid, mk, limit=10, offset=0))
+                eps = (eps_pack or {}).get("items") or []
+
                 if not eps:
                     st.caption("No episodes found.")
                 else:
@@ -386,7 +377,7 @@ def render_podcasts_page():
                             if ep.get("url"):
                                 st.link_button("Open", ep["url"], use_container_width=True)
 
-                        # inline episode player
+                        # Inline episode player
                         emb = st.session_state.get("pod_embed")
                         if emb and emb[2] == f"ep_{i}_{k}" and emb[3] == "res_ep":
                             _embed("episode", ep["id"])
@@ -399,7 +390,6 @@ def render_podcasts_page():
     # ---- Favorites (DEPOIS dos resultados) ----
     st.markdown("### ⭐ My favorites (on this device)")
 
-    # toggle persistido em localStorage
     _raw = (_ls_get("podcasts.showFavs") or "true").strip().lower()
     _show_default = _raw in ("true", "1", "yes", "on")
     show_favs = st.toggle("Show favorites", value=_show_default, key="pod_show_favs")
@@ -437,10 +427,8 @@ def render_podcasts_page():
                                       use_container_width=True, disabled=True)
                         with a2:
                             if st.button("Play latest", key=f"fav_play_{j}", use_container_width=True):
-                                ep = latest_episode_id(
-                                    row.get("id") or "",
-                                    st.session_state.get(WKEY["country"], DEFAULTS["country"])
-                                )
+                                mk = norm_market(st.session_state.get(WKEY["country"], str(DEFAULTS["country"])), default="PT") or "PT"
+                                ep = latest_episode_id(row.get("id") or "", mk)
                                 if ep:
                                     _toggle_embed("episode", ep, f"fav_{j}", "fav")
                                 else:
@@ -461,7 +449,6 @@ def render_podcasts_page():
                         st.rerun()
 
 
-# Permite correr isolado para teste rápido
 if __name__ == "__main__":
     st.set_page_config(page_title="Podcasts", page_icon="🎙️", layout="centered")
     render_podcasts_page()
