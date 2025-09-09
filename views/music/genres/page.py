@@ -17,14 +17,24 @@ from .graph import (
     bfs_down_labels, bfs_up_labels, branch_sankey
 )
 from . import wiki as WIKI
-
+from html import escape
 # (opcional) integração Spotify nos resultados de pesquisa por path
 from services.music.spotify.lookup import (
     get_spotify_token_cached, spotify_genre_top_artists, spotify_genre_playlists
 )
 from .spotify_widgets import render_artist_list, render_playlist_list
 
-
+def _orient_edges_lr(edges, level):
+    """Garante que toda aresta tem level[source] <= level[target]."""
+    out = []
+    for a, b in edges:
+        la = level.get(a, 0)
+        lb = level.get(b, 0)
+        # se veio invertida, troca
+        if la > lb:
+            a, b = b, a
+        out.append((a, b))
+    return out
 
 def _genre_blurb_and_source(name: str):
     """
@@ -214,53 +224,67 @@ def render_genres_page_roots():
 
     # ---------------------- ESQUERDA: subgéneros / folhas ----------------------
     with colL:
-        # filhos diretos deste nó
-        next_children = sorted(x for x in children_idx.get(prefix, set()) if x)
+    # Caminho atual
+        if path:
+            st.caption("Path:")
+            st.write(" / ".join(path))
 
-        st.markdown('<div class="branches">', unsafe_allow_html=True)
+            # 1) Botão Back (sobe um nível)
+            if st.button("⬅ Back one level", key=_key("back_btn", path)):
+                st.session_state["genres_path"] = path[:-1]
+                st.rerun()
+
+        # 2) Picker de subgéneros (selectbox com scroll quando longo; radio quando curto)
+        next_children = sorted(children_idx.get(tuple(path), []), key=str.lower)
 
         if next_children:
-            # ✅ apenas quando há filhos mostramos o link do nó atual
-            cur_url = leaf_url.get(prefix)
-            if cur_url:
-                st.markdown(f"**This node has a Wikipedia page:** [🔗]({cur_url})")
+            st.caption("Subgenres")
 
-            # --- ALTERNATIVA RADIO: super compacto ---
-            radio_key = _key("branch_radio", path)
-            sel = st.radio(
-                "Subgenres",
-                next_children,
-                index=None,  # nada selecionado por omissão
-                key=radio_key,
-                label_visibility="collapsed",
-            )
+            radio_key  = _key("branch_radio", path)
+            select_key = _key("branch_select", path)
 
-            # mostra dinamicamente link para o subgénero selecionado
+            if len(next_children) > 10:
+                # Dropdown com scroll nativo
+                sel = st.selectbox(
+                    "Subgenres",
+                    options=next_children,
+                    index=None,                 # nada selecionado por omissão
+                    key=select_key,
+                    label_visibility="collapsed",
+                    placeholder="Choose a subgenre…",
+                )
+            else:
+                # Lista curta: radio
+                sel = st.radio(
+                    "Subgenres",
+                    next_children,
+                    index=None,                 # nada selecionado por omissão
+                    key=radio_key,
+                    label_visibility="collapsed",
+                )
+
+            # Avança quando o utilizador escolhe um subgénero
             if sel:
                 child_path = path + [sel]
                 child_url = leaf_url.get(tuple(child_path))
                 if child_url:
                     st.caption(f"[Wikipedia]({child_url})")
-
-                # navega imediatamente
                 st.session_state["genres_path"] = child_path
                 st.rerun()
 
         else:
-            # ✅ último nível: só mostra leaves (sem duplicar links)
-            rows = (leaves_idx.get(prefix, []) or [])
+            # Último nível: mostra leaves (se existirem)
+            rows = (leaves_idx.get(tuple(path), []) or [])
             if rows:
                 st.write("Leaves in this branch:")
-                for idx, (txt, url, p) in enumerate(rows[:1000]):
+                for txt, url, p in rows[:1000]:
                     if url:
                         st.markdown(f"[🔗]({url})  **{txt}**  \n`{' / '.join(p)}`")
                     else:
                         st.markdown(f"**{txt}**  \n`{' / '.join(p)}`")
             else:
-                st.info("No leaves under this node.")
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
+                st.info("No leaves under this path.")
+        # ---------------------- FIM ESQUERDA ----------------------
     # ---------------------- DIREITA: resumo + relations + gráfico ----------------------
     with colR:
         root_genre = path[0]     # selecionado na selectbox
@@ -317,7 +341,33 @@ def render_genres_page_roots():
 
         with colDer:
             st.markdown(f"**Derivatives ({len(downstream)} downstream)**")
-            st.markdown(" • ".join(downstream) if downstream else "—")
+            #st.markdown(" • ".join(downstream) if downstream else "—")
+            
+
+            # 👉 CSS para scroll vertical (máx. 5 linhas) e fonte mais pequena
+            st.markdown("""
+            <style>
+            .chips-scroll{
+            max-height: calc(5 * 1.25em);   /* ~5 linhas com line-height 1.25 */
+            overflow-y: auto;
+            padding-right: .5rem;
+            margin-top: .25rem;
+            }
+            .chips-scroll::-webkit-scrollbar{width:8px;height:8px}
+            .chips-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:6px}
+            .chips-scroll span{
+            font-size: 0.92rem;             /* ~-8% */
+            line-height: 1.25;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            # 👉 prepara o texto (mantendo o “•”)
+            deriv_labels = [lbl for lbl in sorted(downstream, key=str.lower) if lbl != root_genre]
+            deriv_html = " • ".join(escape(x) for x in deriv_labels)
+
+            # 👉 contêiner com scroll
+            st.markdown(f'<div class="chips-scroll"><span>{deriv_html}</span></div>', unsafe_allow_html=True)
 
         # Controlo: profundidade e opções do gráfico lado a lado
         ctrlL, ctrlR = st.columns([3, 2])
@@ -345,43 +395,61 @@ def render_genres_page_roots():
         min_depth = max(1, len(path) - 1)
         depth = max(depth, min_depth)
         # Dados do gráfico
-        adj = build_label_adjacency(children_idx)
+        # === Dados do gráfico (branch-only só quando excede o MAX) ===
+        # === Dados do gráfico (branch-only só quando excede o MAX) ===
+        #adj = build_label_adjacency(children_idx)
 
-        # --- helpers para normalizar rótulos e obter filhos diretos de forma robusta ---
-        def _norm_label(s: str) -> str:
-            if s is None:
-                return ""
-            return (str(s)
-                    .replace("\u2011", "-").replace("\u2013", "-").replace("\u2014", "-")
-                    .replace("–", "-").replace("—", "-").replace("\xa0", " ")
-                    .strip().casefold())
-
-        def get_direct_children_adj(adj_map: dict, label: str):
-            # tenta chave exata
-            kids = adj_map.get(label, set())
-            if not kids:
-                # fallback: procura chave equivalente (case/hífen/nbsp)
-                norm = _norm_label(label)
-                for k in adj_map.keys():
-                    if _norm_label(k) == norm:
-                        kids = adj_map.get(k, set())
-                        break
-            # garante lista e dedup por normalização
-            kids_list = sorted(list(kids), key=str.lower)
-            uniq_norm = { _norm_label(k) for k in kids_list }
-            return kids_list, len(uniq_norm)
-
-        MAX_FIRST_LEVEL = 20
-        direct_children, direct_count = get_direct_children_adj(adj, root_genre)
+        MAX_FIRST_LEVEL = 20  # ajusta aqui (20 ou 30, etc.)
+        root_first_children = sorted(children_idx.get((root_genre,), []), key=str.lower)
+        direct_count = len(root_first_children)
         too_many = direct_count > MAX_FIRST_LEVEL
 
+        # (debug opcional — remove depois)
+        st.caption(f"mode: "
+                f"{'await-branch' if (too_many and len(path)<=1) else ('branch-only' if (too_many and len(path)>1) else 'full')}"
+                f" | direct={direct_count}/{MAX_FIRST_LEVEL} | path_len={len(path)}")
+
+        # 2) Construção do grafo conforme a regra
+        adj = build_label_adjacency(children_idx)
+
         if too_many and len(path) <= 1:
-            st.info(
-                f"“{root_genre}” has {direct_count} direct subgenres. "
-                "Pick a subgenre on the left to display just that branch."
+            # Excede o MAX mas ainda só tens o root → NÃO desenhar nada (espera seleção)
+            st.info(f'“{root_genre}” has {direct_count} direct subgenres. '
+                    'Pick a subgenre on the left to display just that branch.')
+            st.stop()  # impede qualquer plot mais abaixo
+
+        if too_many and len(path) > 1:
+            # 🚦 EXCEDE o MAX e já há seleção → mostrar APENAS o ramo root → path[1] → …
+            selected_first = path[1]
+            depth_right = max(0, depth - 1)
+
+            # Direita: ramo a partir do 1.º subgénero escolhido
+            right_nodes, right_edges, right_level = bfs_down_labels(adj, selected_first, depth_right)
+
+            # Esquerda: upstream do root (contexto)
+            adj_up = build_reverse_adjacency(adj)
+            nodes_up, edges_up, level_up = bfs_up_labels(adj_up, root_genre, depth)
+
+            # Compõe grafo só com o ramo selecionado
+            edges = edges_up + [(root_genre, selected_first)] + right_edges
+            level = {
+                **level_up,
+                root_genre: 0,
+                selected_first: 1,
+                **{n: l + 1 for n, l in right_level.items()}  # desloca níveis do ramo para a direita
+            }
+            nodes = sorted(set([*nodes_up, root_genre, selected_first, *right_nodes]), key=str.lower)
+
+            fig = branch_sankey(
+                nodes, edges, level,
+                root=root_genre, focus=path[-1],
+                branch_only=True, is_mobile=False,
+                height_override=gh, font_size_override=fs
             )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.caption("Blue = highlighted path from root to the selected branch.")
         else:
-            # --- exatamente como já tinhas ---
+            # ✅ Não excede o MAX → grafo completo
             nodes_ds, edges_ds, level_ds = bfs_down_labels(adj, root_genre, depth)
             adj_up = build_reverse_adjacency(adj)
             nodes_up, edges_up, level_up = bfs_up_labels(adj_up, root_genre, depth)
@@ -390,33 +458,15 @@ def render_genres_page_roots():
             edges = edges_up + edges_ds
             level = {root_genre: 0, **level_up, **level_ds}
 
-            # quando há muitos ramos diretos, renderiza só o ramo escolhido
-            branch_only = (too_many and len(path) > 1)
-            if branch_only and len(path) > 1:
-                selected_first = path[1]
-                right_nodes, right_edges, right_level = bfs_down_labels(adj, selected_first, max(0, depth - 1))
-                edges = edges_up + [(root_genre, selected_first)] + right_edges
-                level = {
-                    **level_up,
-                    root_genre: 0,
-                    selected_first: 1,
-                    **{n: l + 1 for n, l in right_level.items()}
-                }
-                nodes = sorted(set([*nodes_up, root_genre, selected_first, *right_nodes]), key=str.lower)
+            fig = branch_sankey(
+                nodes, edges, level,
+                root=root_genre, focus=path[-1] if path else root_genre,
+                branch_only=False, is_mobile=False,
+                height_override=gh, font_size_override=fs
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.caption("Blue = highlighted path from root to the selected branch.")
 
-            if not nodes or not edges:
-                st.info("No links for this depth.")
-            else:
-                fig = branch_sankey(
-                    nodes, edges, level,
-                    root=root_genre, focus=focus,
-                    branch_only=branch_only, is_mobile=False,
-                    height_override=gh, font_size_override=fs
-                )
-                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-                st.caption("Blue = highlighted path from root to the selected branch.")
-
-
-# alias de compatibilidade
-render_genres_page = render_genres_page_roots
+        # alias de compatibilidade
+        render_genres_page = render_genres_page_roots
 
