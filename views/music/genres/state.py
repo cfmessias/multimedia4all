@@ -3,6 +3,9 @@ import streamlit as st
 
 PLACEHOLDER = "— choose a root genre —"
 CLEAR_FLAG  = "__clear_search_next__"
+# state.py
+CLEAR_FLAG_GENRES = "genres_clear_once"
+CLEAR_FLAG_RADIO  = "radio_clear_once"
 
 def on_root_change():
     sel = st.session_state.get("root_select", PLACEHOLDER)

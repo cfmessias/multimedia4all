@@ -6,6 +6,8 @@ import plotly.graph_objects as go
 from collections import defaultdict, deque
 import numpy as np
 from typing import List, Tuple, Dict, Set
+import numpy as np  
+from collections import defaultdict as _dd, deque as _deq
 
 Edge = Tuple[str, str]
 
@@ -157,11 +159,6 @@ def branch_sankey(
     HILITE_LINK = "rgba(79,195,247,0.95)"
     BLUE_LEFT   = "rgba(59,130,246,0.50)"   # upstream
 
-    import numpy as np
-    import plotly.express as px
-    import plotly.graph_objects as go
-    from collections import defaultdict as _dd, deque as _deq
-
     PALETTE = px.colors.qualitative.Dark24
 
     # -------- normalização p/ lookups robustos --------
@@ -196,41 +193,33 @@ def branch_sankey(
         level_norm[_norm(DUMMY_A)] = level_mut[DUMMY_A]
         level_norm[_norm(DUMMY_B)] = level_mut[DUMMY_B]
 
-    # =========================================================
-    # 1) INFERIR NÍVEIS EM FALTA A PARTIR DAS ARESTAS ORIGINAIS
-    #    regra: para cada u→v, se lvl(u) conhecido e lvl(v) não, então lvl(v)=lvl(u)+1
-    #           e se lvl(v) conhecido e lvl(u) não, então lvl(u)=lvl(v)-1
-    #    iteramos até estabilizar (ou n vezes)
-    # =========================================================
-    edges0 = list(edges)  # guarda orientação original
+    # 1) Inferir níveis que faltam a partir das arestas originais
+    edges0 = list(edges)
     for _ in range(len(nodes) + 3):
         changed = False
         for a, b in edges0:
-            la = get_lvl(a)
-            lb = get_lvl(b)
+            la = get_lvl(a); lb = get_lvl(b)
             if la is not None and lb is None:
-                level_mut[b] = la + 1
-                level_norm[_norm(b)] = la + 1
-                changed = True
+                level_mut[b] = la + 1; level_norm[_norm(b)] = la + 1; changed = True
             elif lb is not None and la is None:
-                level_mut[a] = lb - 1
-                level_norm[_norm(a)] = lb - 1
-                changed = True
+                level_mut[a] = lb - 1; level_norm[_norm(a)] = lb - 1; changed = True
         if not changed:
             break
 
-    # 2) SÓ inverter arestas quando AMBOS os níveis existem e estão trocados
+    # 2) Orientar L→R apenas quando ambos os níveis existem e estão trocados
     def _orient_edges_lr(E):
         out = []
         for a, b in E:
             la, lb = get_lvl(a), get_lvl(b)
-            if la is not None and lb is not None and la > lb:
-                out.append((b, a))
-            else:
-                out.append((a, b))
+            out.append((b, a) if (la is not None and lb is not None and la > lb) else (a, b))
         return out
 
     edges = _orient_edges_lr(edges0)
+
+    # ⬅⬅⬅ MUDANÇA IMPORTANTE AQUI
+    # Em vez de depender de níveis contíguos, obtemos o caminho root→focus
+    # diretamente sobre as arestas orientadas (BFS simples).
+    path_edges = set(_path_edges(edges, root, focus))
 
     # posições x (por nível) e y (espalhamento)
     idx = {n: i for i, n in enumerate(nodes)}
@@ -254,21 +243,20 @@ def branch_sankey(
     reps = (len(nodes) // len(PALETTE)) + 1
     ncolors = (PALETTE * reps)[:len(nodes)]
 
-    # --- mapeamento de ramos a partir do root (inalterado) ---
-    children_map = _dd(list)
+    # mapeamento de ramos a partir do root (inalterado)
+    children_map = defaultdict(list)
     for a, b in edges:
         if get_lvl(a, 0) >= 0 and get_lvl(b, 0) > 0:
             children_map[a].append(b)
     firsthop = {}
-    for child in children_map.get(root, []):
-        firsthop[child] = child
-        dq = _deq([child])
-        while dq:
-            u = dq.popleft()
-            for v in children_map.get(u, []):
-                if v not in firsthop:
-                    firsthop[v] = firsthop[u]
-                    dq.append(v)
+    dq = deque(children_map.get(root, []))
+    for ch in children_map.get(root, []):
+        firsthop[ch] = ch
+    while dq:
+        u = dq.popleft()
+        for v in children_map.get(u, []):
+            if v not in firsthop:
+                firsthop[v] = firsthop[u]; dq.append(v)
 
     BRANCH_TONES = {
         "Alternative rock": "rgba(255,255,255,0.34)",
@@ -281,11 +269,8 @@ def branch_sankey(
         "Ethereal wave":    "rgba(255,255,255,0.34)",
     }
 
-    # caminho root→focus usando níveis já corrigidos
-    path_edges = set(_path_root_to_focus(root, focus, edges, level_mut))
+    # nós no caminho (garante root/focus)
     path_nodes = {root, focus} | {a for a, _ in path_edges} | {b for _, b in path_edges}
-
-    # pinta nós do caminho a azul-celeste
     for i, n in enumerate(nodes):
         if n in path_nodes:
             ncolors[i] = HILITE_HEX
@@ -293,7 +278,7 @@ def branch_sankey(
         ncolors[idx[DUMMY_A]] = "rgba(0,0,0,0)"
         ncolors[idx[DUMMY_B]] = "rgba(0,0,0,0)"
 
-    # --- ligações ---
+    # ligações
     src, dst, val, lcol = [], [], [], []
     for a, b in edges:
         if a not in idx or b not in idx:
